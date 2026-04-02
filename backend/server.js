@@ -1,7 +1,6 @@
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
-import mongoose from 'mongoose';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
@@ -11,6 +10,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
+import sqlite3 from 'sqlite3';
+import { open } from 'sqlite';
 
 dotenv.config();
 
@@ -20,20 +21,20 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const server = createServer(app);
 const io = new Server(server, {
-  cors: { origin: "http://localhost:3000", credentials: true }
+  cors: { origin: "*", credentials: true }
 });
 
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '100mb' }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Создаем папку для загрузок
+// Создаем папки
 const uploadDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 if (!fs.existsSync(path.join(uploadDir, 'avatars'))) fs.mkdirSync(path.join(uploadDir, 'avatars'));
 if (!fs.existsSync(path.join(uploadDir, 'files'))) fs.mkdirSync(path.join(uploadDir, 'files'));
 
-// Настройка multer для загрузки файлов (локальное хранилище)
+// Multer
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     if (file.fieldname === 'avatar') {
@@ -49,51 +50,83 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } });
 
-// ============ МОДЕЛИ MONGODB ============
-const userSchema = new mongoose.Schema({
-  email: { type: String, unique: true, required: true },
-  password: { type: String, required: true },
-  firstName: String,
-  lastName: String,
-  username: { type: String, unique: true, required: true, match: /^[a-zA-Z0-9_]+$/ },
-  avatar: String,
-  emailVerified: { type: Boolean, default: false },
-  verificationCode: String,
-  contacts: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-  isOnline: { type: Boolean, default: false },
-  lastSeen: Date
-}, { timestamps: true });
+// ============ SQLite БАЗА ДАННЫХ ============
+let db;
 
-const messageSchema = new mongoose.Schema({
-  chatId: String,
-  senderId: String,
-  receiverId: String,
-  type: { type: String, default: 'text' },
-  content: String,
-  fileUrl: String,
-  fileName: String,
-  timestamp: { type: Date, default: Date.now },
-  read: { type: Boolean, default: false }
-});
+const initDB = async () => {
+  db = await open({
+    filename: './noris.db',
+    driver: sqlite3.Database
+  });
 
-const groupSchema = new mongoose.Schema({
-  name: String,
-  photo: String,
-  members: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
-  creatorId: String,
-  type: { type: String, default: 'group' },
-  username: { type: String, unique: true, sparse: true },
-  isPublic: { type: Boolean, default: false }
-}, { timestamps: true });
+  // Таблица пользователей
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      email TEXT UNIQUE,
+      password TEXT,
+      firstName TEXT,
+      lastName TEXT,
+      username TEXT UNIQUE,
+      avatar TEXT,
+      emailVerified INTEGER DEFAULT 0,
+      verificationCode TEXT,
+      isOnline INTEGER DEFAULT 0,
+      lastSeen TEXT,
+      createdAt TEXT
+    )
+  `);
 
-const User = mongoose.model('User', userSchema);
-const Message = mongoose.model('Message', messageSchema);
-const Group = mongoose.model('Group', groupSchema);
+  // Таблица сообщений
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id TEXT PRIMARY KEY,
+      chatId TEXT,
+      senderId TEXT,
+      receiverId TEXT,
+      type TEXT,
+      content TEXT,
+      fileUrl TEXT,
+      fileName TEXT,
+      read INTEGER DEFAULT 0,
+      timestamp TEXT
+    )
+  `);
 
-// ============ НАСТРОЙКА ПОЧТЫ (тестовый аккаунт, регистрация не нужна) ============
+  // Таблица групп
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS groups (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      photo TEXT,
+      creatorId TEXT,
+      type TEXT DEFAULT 'group',
+      createdAt TEXT
+    )
+  `);
+
+  // Таблица участников групп
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS group_members (
+      groupId TEXT,
+      userId TEXT
+    )
+  `);
+
+  // Таблица контактов
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS contacts (
+      userId TEXT,
+      contactId TEXT
+    )
+  `);
+
+  console.log('✅ SQLite база данных готова');
+};
+
+// ============ ПОЧТА ============
 let transporter;
 const setupMailer = async () => {
-  // Создаем тестовый аккаунт Ethereal автоматически (не нужна регистрация)
   const testAccount = await nodemailer.createTestAccount();
   transporter = nodemailer.createTransport({
     host: 'smtp.ethereal.email',
@@ -101,11 +134,10 @@ const setupMailer = async () => {
     secure: false,
     auth: { user: testAccount.user, pass: testAccount.pass }
   });
-  console.log('📧 Тестовая почта готова! Письма смотреть тут: https://ethereal.email/login');
+  console.log('📧 Тестовая почта готова!');
   console.log(`📧 Логин: ${testAccount.user}`);
   console.log(`📧 Пароль: ${testAccount.pass}`);
 };
-setupMailer();
 
 // ============ MIDDLEWARE ============
 const auth = async (req, res, next) => {
@@ -113,7 +145,7 @@ const auth = async (req, res, next) => {
     const token = req.headers.authorization?.split(' ')[1];
     if (!token) return res.status(401).json({ error: 'Не авторизован' });
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    const user = await User.findById(decoded.id).select('-password');
+    const user = await db.get('SELECT id, email, username, firstName, lastName, avatar, isOnline FROM users WHERE id = ?', [decoded.id]);
     if (!user) return res.status(401).json({ error: 'Пользователь не найден' });
     req.user = user;
     next();
@@ -133,19 +165,18 @@ app.post('/api/auth/register', async (req, res) => {
       return res.status(400).json({ error: 'Никнейм только латиница, цифры, _' });
     }
     
-    const existing = await User.findOne({ $or: [{ email }, { username }] });
+    const existing = await db.get('SELECT id FROM users WHERE email = ? OR username = ?', [email, username]);
     if (existing) return res.status(400).json({ error: 'Email или никнейм занят' });
     
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const hashedPassword = await bcrypt.hash(password, 10);
+    const id = Date.now().toString();
     
-    const user = new User({ 
-      email, password: hashedPassword, firstName, lastName, username, 
-      verificationCode: code, emailVerified: false 
-    });
-    await user.save();
+    await db.run(
+      'INSERT INTO users (id, email, password, firstName, lastName, username, verificationCode, emailVerified, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)',
+      [id, email, hashedPassword, firstName, lastName, username, code, new Date().toISOString()]
+    );
     
-    // Отправляем письмо (через тестовую почту)
     const info = await transporter.sendMail({
       from: '"Noris" <noreply@noris.com>',
       to: email,
@@ -154,8 +185,7 @@ app.post('/api/auth/register', async (req, res) => {
     });
     
     console.log(`📧 Письмо отправлено! Превью: ${nodemailer.getTestMessageUrl(info)}`);
-    
-    res.json({ message: 'Код отправлен', userId: user._id, testEmailUrl: nodemailer.getTestMessageUrl(info) });
+    res.json({ message: 'Код отправлен', userId: id, testEmailUrl: nodemailer.getTestMessageUrl(info) });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -165,15 +195,13 @@ app.post('/api/auth/register', async (req, res) => {
 app.post('/api/auth/verify', async (req, res) => {
   try {
     const { userId, code } = req.body;
-    const user = await User.findById(userId);
+    const user = await db.get('SELECT * FROM users WHERE id = ?', [userId]);
     if (!user || user.verificationCode !== code) return res.status(400).json({ error: 'Неверный код' });
     
-    user.emailVerified = true;
-    user.verificationCode = null;
-    await user.save();
+    await db.run('UPDATE users SET emailVerified = 1, verificationCode = NULL WHERE id = ?', [userId]);
     
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, user: { id: user._id, username: user.username, firstName: user.firstName, lastName: user.lastName, avatar: user.avatar } });
+    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user: { id: user.id, username: user.username, firstName: user.firstName, lastName: user.lastName, avatar: user.avatar } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -183,14 +211,13 @@ app.post('/api/auth/verify', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = await User.findOne({ email });
+    const user = await db.get('SELECT * FROM users WHERE email = ?', [email]);
     if (!user || !(await bcrypt.compare(password, user.password))) {
       return res.status(401).json({ error: 'Неверный email или пароль' });
     }
-    const token = jwt.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
-    user.isOnline = true;
-    await user.save();
-    res.json({ token, user: { id: user._id, username: user.username, firstName: user.firstName, lastName: user.lastName, avatar: user.avatar } });
+    const token = jwt.sign({ id: user.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    await db.run('UPDATE users SET isOnline = 1, lastSeen = ? WHERE id = ?', [new Date().toISOString(), user.id]);
+    res.json({ token, user: { id: user.id, username: user.username, firstName: user.firstName, lastName: user.lastName, avatar: user.avatar } });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -205,10 +232,10 @@ app.get('/api/users/me', auth, async (req, res) => {
 app.get('/api/users/search', auth, async (req, res) => {
   try {
     const { q } = req.query;
-    const users = await User.find({ 
-      username: { $regex: q, $options: 'i' },
-      _id: { $ne: req.user._id }
-    }).limit(20).select('username firstName lastName avatar');
+    const users = await db.all(
+      'SELECT id, username, firstName, lastName, avatar FROM users WHERE username LIKE ? AND id != ? LIMIT 20',
+      [`%${q}%`, req.user.id]
+    );
     res.json(users);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -219,7 +246,7 @@ app.get('/api/users/search', auth, async (req, res) => {
 app.post('/api/users/contact', auth, async (req, res) => {
   try {
     const { contactId } = req.body;
-    await User.findByIdAndUpdate(req.user._id, { $addToSet: { contacts: contactId } });
+    await db.run('INSERT OR IGNORE INTO contacts (userId, contactId) VALUES (?, ?)', [req.user.id, contactId]);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -229,14 +256,17 @@ app.post('/api/users/contact', auth, async (req, res) => {
 // Получить контакты
 app.get('/api/users/contacts', auth, async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).populate('contacts', 'username firstName lastName avatar isOnline');
-    res.json(user.contacts);
+    const contacts = await db.all(
+      'SELECT u.id, u.username, u.firstName, u.lastName, u.avatar, u.isOnline FROM contacts c JOIN users u ON c.contactId = u.id WHERE c.userId = ?',
+      [req.user.id]
+    );
+    res.json(contacts);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Загрузка файла (локально)
+// Загрузка файла
 app.post('/api/upload', auth, upload.single('file'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'Нет файла' });
@@ -252,7 +282,7 @@ app.post('/api/upload/avatar', auth, upload.single('avatar'), async (req, res) =
   try {
     if (!req.file) return res.status(400).json({ error: 'Нет файла' });
     const avatarUrl = `${req.protocol}://${req.get('host')}/uploads/avatars/${req.file.filename}`;
-    await User.findByIdAndUpdate(req.user._id, { avatar: avatarUrl });
+    await db.run('UPDATE users SET avatar = ? WHERE id = ?', [avatarUrl, req.user.id]);
     res.json({ url: avatarUrl });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -263,28 +293,32 @@ app.post('/api/upload/avatar', auth, upload.single('avatar'), async (req, res) =
 app.post('/api/groups', auth, async (req, res) => {
   try {
     const { name, members } = req.body;
-    const group = new Group({ 
-      name, 
-      members: [req.user._id, ...(members || [])], 
-      creatorId: req.user._id 
-    });
-    await group.save();
-    res.json(group);
+    const id = Date.now().toString();
+    await db.run('INSERT INTO groups (id, name, creatorId, type, createdAt) VALUES (?, ?, ?, ?, ?)', [id, name, req.user.id, 'group', new Date().toISOString()]);
+    await db.run('INSERT INTO group_members (groupId, userId) VALUES (?, ?)', [id, req.user.id]);
+    for (const member of (members || [])) {
+      await db.run('INSERT INTO group_members (groupId, userId) VALUES (?, ?)', [id, member]);
+    }
+    res.json({ id, name });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Получить чаты (диалоги и группы)
+// Получить чаты
 app.get('/api/chats', auth, async (req, res) => {
   try {
-    // Получаем последние сообщения для каждого чата
-    const privateChats = await User.find({ _id: { $in: req.user.contacts } }).select('username firstName lastName avatar');
-    const groups = await Group.find({ members: req.user._id });
-    
+    const contacts = await db.all(
+      'SELECT u.id, u.username, u.firstName, u.lastName, u.avatar FROM contacts c JOIN users u ON c.contactId = u.id WHERE c.userId = ?',
+      [req.user.id]
+    );
+    const groups = await db.all(
+      'SELECT g.id, g.name, g.photo FROM groups g JOIN group_members gm ON g.id = gm.groupId WHERE gm.userId = ?',
+      [req.user.id]
+    );
     const chats = [
-      ...privateChats.map(u => ({ id: u._id, name: u.username, type: 'user', avatar: u.avatar })),
-      ...groups.map(g => ({ id: g._id, name: g.name, type: 'group', avatar: g.photo }))
+      ...contacts.map(c => ({ id: c.id, name: c.username, type: 'user', avatar: c.avatar })),
+      ...groups.map(g => ({ id: g.id, name: g.name, type: 'group', avatar: g.photo }))
     ];
     res.json(chats);
   } catch (err) {
@@ -295,11 +329,11 @@ app.get('/api/chats', auth, async (req, res) => {
 // Получить историю сообщений
 app.get('/api/messages/:chatId', auth, async (req, res) => {
   try {
-    const messages = await Message.find({ chatId: req.params.chatId })
-      .sort({ timestamp: -1 })
-      .limit(50)
-      .populate('senderId', 'username firstName lastName avatar');
-    res.json(messages.reverse());
+    const messages = await db.all(
+      'SELECT * FROM messages WHERE chatId = ? ORDER BY timestamp ASC LIMIT 100',
+      [req.params.chatId]
+    );
+    res.json(messages);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -321,67 +355,56 @@ io.use((socket, next) => {
 io.on('connection', async (socket) => {
   console.log('✅ Пользователь подключился:', socket.userId);
   
-  // Обновляем статус онлайн
-  await User.findByIdAndUpdate(socket.userId, { isOnline: true, lastSeen: new Date() });
+  await db.run('UPDATE users SET isOnline = 1, lastSeen = ? WHERE id = ?', [new Date().toISOString(), socket.userId]);
   socket.join(`user_${socket.userId}`);
   io.emit('user_status', { userId: socket.userId, isOnline: true });
   
-  // Отправка сообщения
   socket.on('send_message', async (data) => {
     try {
-      const message = new Message({
-        chatId: data.chatId,
-        senderId: socket.userId,
-        receiverId: data.receiverId,
-        type: data.type || 'text',
-        content: data.content,
-        fileUrl: data.fileUrl,
-        fileName: data.fileName
-      });
-      await message.save();
+      const id = Date.now().toString() + Math.random().toString(36).substr(2, 4);
+      await db.run(
+        'INSERT INTO messages (id, chatId, senderId, receiverId, type, content, fileUrl, fileName, read, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        [id, data.chatId, socket.userId, data.receiverId, data.type || 'text', data.content, data.fileUrl, data.fileName, 0, new Date().toISOString()]
+      );
       
-      const populated = await Message.findById(message._id).populate('senderId', 'username firstName lastName avatar');
+      const message = await db.get('SELECT * FROM messages WHERE id = ?', [id]);
       
-      // Отправляем получателю
       if (data.receiverId) {
-        io.to(`user_${data.receiverId}`).emit('new_message', populated);
+        io.to(`user_${data.receiverId}`).emit('new_message', message);
       }
-      // Если это группа
       if (data.chatId && !data.receiverId) {
-        io.to(data.chatId).emit('new_message', populated);
+        io.to(data.chatId).emit('new_message', message);
       }
-      // Подтверждаем отправителю
-      socket.emit('message_sent', populated);
+      socket.emit('message_sent', message);
     } catch (err) {
       socket.emit('message_error', { error: err.message });
     }
   });
   
-  // Печатает
   socket.on('typing', (data) => {
     if (data.receiverId) {
       socket.to(`user_${data.receiverId}`).emit('user_typing', { userId: socket.userId, chatId: data.chatId });
     }
   });
   
-  // Присоединение к группе
   socket.on('join_group', (groupId) => {
     socket.join(groupId);
   });
   
   socket.on('disconnect', async () => {
     console.log('❌ Пользователь отключился:', socket.userId);
-    await User.findByIdAndUpdate(socket.userId, { isOnline: false, lastSeen: new Date() });
+    await db.run('UPDATE users SET isOnline = 0, lastSeen = ? WHERE id = ?', [new Date().toISOString(), socket.userId]);
     io.emit('user_status', { userId: socket.userId, isOnline: false });
   });
 });
 
 // ============ ЗАПУСК ============
-mongoose.connect(process.env.MONGO_URI).then(() => {
-  console.log('✅ MongoDB подключена');
-  server.listen(process.env.PORT || 5000, () => {
-    console.log(`🚀 Noris сервер запущен: http://localhost:${process.env.PORT || 5000}`);
+const start = async () => {
+  await initDB();
+  await setupMailer();
+  server.listen(process.env.PORT || 10000, () => {
+    console.log(`🚀 Noris сервер запущен на порту ${process.env.PORT || 10000}`);
   });
-}).catch(err => {
-  console.error('❌ Ошибка MongoDB:', err.message);
-});
+};
+
+start();
