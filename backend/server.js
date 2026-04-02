@@ -20,180 +20,73 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const server = createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*", credentials: true }
-});
+const io = new Server(server, { cors: { origin: "*" } });
 
 app.use(cors());
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '100mb' }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Создаём папки для файлов
+// Папки
 const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
-if (!fs.existsSync(path.join(uploadDir, 'avatars'))) fs.mkdirSync(path.join(uploadDir, 'avatars'));
-if (!fs.existsSync(path.join(uploadDir, 'files'))) fs.mkdirSync(path.join(uploadDir, 'files'));
-if (!fs.existsSync(path.join(uploadDir, 'stickers'))) fs.mkdirSync(path.join(uploadDir, 'stickers'));
+['', '/avatars', '/files', '/stickers', '/voice', '/video'].forEach(folder => {
+  const dir = path.join(uploadDir, folder);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+});
 
-// Multer настройка
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    if (file.fieldname === 'avatar') cb(null, path.join(uploadDir, 'avatars'));
-    else if (file.fieldname === 'sticker') cb(null, path.join(uploadDir, 'stickers'));
-    else cb(null, path.join(uploadDir, 'files'));
+    let folder = '/files';
+    if (file.fieldname === 'avatar') folder = '/avatars';
+    else if (file.fieldname === 'sticker') folder = '/stickers';
+    else if (file.mimetype?.startsWith('audio/')) folder = '/voice';
+    else if (file.mimetype?.startsWith('video/')) folder = '/video';
+    cb(null, path.join(uploadDir, folder));
   },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + '-' + file.originalname);
-  }
+  filename: (req, file, cb) => cb(null, Date.now() + '-' + file.originalname)
 });
 const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } });
 
-// ==================== БАЗА ДАННЫХ SQLITE ====================
+// ========== БАЗА ДАННЫХ ==========
 let db;
 const initDB = async () => {
-  db = await open({
-    filename: './noris.db',
-    driver: sqlite3.Database
-  });
+  db = await open({ filename: './noris.db', driver: sqlite3.Database });
 
-  // Пользователи
   await db.exec(`
     CREATE TABLE IF NOT EXISTS users (
-      id TEXT PRIMARY KEY,
-      email TEXT UNIQUE,
-      password TEXT,
-      firstName TEXT,
-      lastName TEXT,
-      username TEXT UNIQUE,
-      avatar TEXT,
-      isOnline INTEGER DEFAULT 0,
-      lastSeen TEXT
-    )
-  `);
-
-  // Сообщения
-  await db.exec(`
+      id TEXT PRIMARY KEY, email TEXT UNIQUE, password TEXT,
+      firstName TEXT, lastName TEXT, username TEXT UNIQUE,
+      avatar TEXT, isOnline INTEGER DEFAULT 0, lastSeen TEXT
+    );
     CREATE TABLE IF NOT EXISTS messages (
-      id TEXT PRIMARY KEY,
-      chatId TEXT,
-      senderId TEXT,
-      receiverId TEXT,
-      type TEXT,
-      content TEXT,
-      fileUrl TEXT,
-      fileName TEXT,
-      isSticker INTEGER DEFAULT 0,
-      replyTo TEXT,
-      pinned INTEGER DEFAULT 0,
-      read INTEGER DEFAULT 0,
-      createdAt TEXT
-    )
-  `);
-
-  // Группы
-  await db.exec(`
+      id TEXT PRIMARY KEY, chatId TEXT, senderId TEXT, receiverId TEXT,
+      type TEXT, content TEXT, fileUrl TEXT, fileName TEXT, duration INTEGER,
+      isSticker INTEGER DEFAULT 0, replyTo TEXT, pinned INTEGER DEFAULT 0,
+      read INTEGER DEFAULT 0, createdAt TEXT
+    );
     CREATE TABLE IF NOT EXISTS groups (
-      id TEXT PRIMARY KEY,
-      name TEXT,
-      description TEXT,
-      avatar TEXT,
-      creatorId TEXT,
-      type TEXT DEFAULT 'group',
-      isPublic INTEGER DEFAULT 0,
-      inviteLink TEXT,
-      createdAt TEXT
-    )
-  `);
-
-  // Участники групп
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS group_members (
-      groupId TEXT,
-      userId TEXT,
-      role TEXT DEFAULT 'member',
-      PRIMARY KEY (groupId, userId)
-    )
-  `);
-
-  // Каналы
-  await db.exec(`
+      id TEXT PRIMARY KEY, name TEXT, description TEXT, avatar TEXT,
+      creatorId TEXT, inviteLink TEXT, createdAt TEXT
+    );
+    CREATE TABLE IF NOT EXISTS group_members (groupId TEXT, userId TEXT, role TEXT);
     CREATE TABLE IF NOT EXISTS channels (
-      id TEXT PRIMARY KEY,
-      name TEXT,
-      description TEXT,
-      avatar TEXT,
-      creatorId TEXT,
-      username TEXT UNIQUE,
-      isPublic INTEGER DEFAULT 1,
-      inviteLink TEXT,
-      createdAt TEXT
-    )
-  `);
-
-  // Подписчики каналов
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS channel_subscribers (
-      channelId TEXT,
-      userId TEXT,
-      PRIMARY KEY (channelId, userId)
-    )
-  `);
-
-  // Контакты
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS contacts (
-      userId TEXT,
-      contactId TEXT,
-      PRIMARY KEY (userId, contactId)
-    )
-  `);
-
-  // Стикерпаки
-  await db.exec(`
+      id TEXT PRIMARY KEY, name TEXT, description TEXT, avatar TEXT,
+      creatorId TEXT, username TEXT UNIQUE, inviteLink TEXT, createdAt TEXT
+    );
+    CREATE TABLE IF NOT EXISTS channel_subscribers (channelId TEXT, userId TEXT);
+    CREATE TABLE IF NOT EXISTS contacts (userId TEXT, contactId TEXT);
     CREATE TABLE IF NOT EXISTS sticker_packs (
-      id TEXT PRIMARY KEY,
-      name TEXT,
-      creatorId TEXT,
-      coverSticker TEXT,
-      inviteLink TEXT,
-      createdAt TEXT
-    )
+      id TEXT PRIMARY KEY, name TEXT, creatorId TEXT, inviteLink TEXT, createdAt TEXT
+    );
+    CREATE TABLE IF NOT EXISTS stickers (id TEXT PRIMARY KEY, packId TEXT, imageUrl TEXT, emoji TEXT);
+    CREATE TABLE IF NOT EXISTS user_sticker_packs (userId TEXT, packId TEXT);
+    CREATE TABLE IF NOT EXISTS pinned_chats (userId TEXT, chatId TEXT);
+    CREATE TABLE IF NOT EXISTS deleted_chats (userId TEXT, chatId TEXT);
   `);
-
-  // Стикеры
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS stickers (
-      id TEXT PRIMARY KEY,
-      packId TEXT,
-      imageUrl TEXT,
-      emoji TEXT,
-      createdAt TEXT
-    )
-  `);
-
-  // Пользовательские стикерпаки
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS user_sticker_packs (
-      userId TEXT,
-      packId TEXT,
-      PRIMARY KEY (userId, packId)
-    )
-  `);
-
-  // Закреплённые чаты
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS pinned_chats (
-      userId TEXT,
-      chatId TEXT,
-      PRIMARY KEY (userId, chatId)
-    )
-  `);
-
-  console.log('✅ SQLite база готова');
+  console.log('✅ База готова');
 };
 await initDB();
 
-// ==================== MIDDLEWARE AUTH ====================
+// ========== AUTH ==========
 const auth = async (req, res, next) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
@@ -203,20 +96,18 @@ const auth = async (req, res, next) => {
     if (!user) return res.status(401).json({ error: 'User not found' });
     req.user = user;
     next();
-  } catch {
-    res.status(401).json({ error: 'Invalid token' });
-  }
+  } catch { res.status(401).json({ error: 'Invalid token' }); }
 };
 
-// ==================== API РОУТЫ ====================
 app.post('/api/auth/register', async (req, res) => {
   const { email, password, firstName, lastName, username } = req.body;
-  if (!/^[a-zA-Z0-9_]+$/.test(username)) return res.status(400).json({ error: 'Никнейм только латиница, цифры, _' });
+  if (!/^[a-zA-Z0-9_]+$/.test(username)) return res.status(400).json({ error: 'Никнейм только латиница' });
   const existing = await db.get('SELECT id FROM users WHERE email = ? OR username = ?', [email, username]);
   if (existing) return res.status(400).json({ error: 'Email или никнейм занят' });
   const hashed = await bcrypt.hash(password, 10);
   const id = uuidv4();
-  await db.run('INSERT INTO users (id, email, password, firstName, lastName, username, isOnline, lastSeen) VALUES (?, ?, ?, ?, ?, ?, 0, ?)', [id, email, hashed, firstName, lastName, username, new Date().toISOString()]);
+  await db.run('INSERT INTO users (id, email, password, firstName, lastName, username, lastSeen) VALUES (?,?,?,?,?,?,?)', 
+    [id, email, hashed, firstName, lastName, username, new Date().toISOString()]);
   res.json({ userId: id });
 });
 
@@ -229,32 +120,41 @@ app.post('/api/auth/login', async (req, res) => {
   res.json({ token, user: { id: user.id, username: user.username, firstName: user.firstName, lastName: user.lastName, avatar: user.avatar } });
 });
 
-app.get('/api/users/me', auth, async (req, res) => {
-  res.json({ user: req.user });
-});
-
+app.get('/api/users/me', auth, (req, res) => res.json({ user: req.user }));
 app.get('/api/users/search', auth, async (req, res) => {
-  const { q } = req.query;
-  const users = await db.all('SELECT id, username, firstName, lastName, avatar FROM users WHERE username LIKE ? AND id != ? LIMIT 20', [`%${q}%`, req.user.id]);
+  const users = await db.all('SELECT id, username, firstName, lastName, avatar FROM users WHERE username LIKE ? AND id != ? LIMIT 20', [`%${req.query.q}%`, req.user.id]);
   res.json(users);
 });
-
 app.post('/api/users/contact', auth, async (req, res) => {
-  const { contactId } = req.body;
-  await db.run('INSERT OR IGNORE INTO contacts (userId, contactId) VALUES (?, ?)', [req.user.id, contactId]);
+  await db.run('INSERT OR IGNORE INTO contacts VALUES (?, ?)', [req.user.id, req.body.contactId]);
   res.json({ success: true });
 });
-
 app.get('/api/users/contacts', auth, async (req, res) => {
   const contacts = await db.all('SELECT u.id, u.username, u.firstName, u.lastName, u.avatar, u.isOnline FROM contacts c JOIN users u ON c.contactId = u.id WHERE c.userId = ?', [req.user.id]);
   res.json(contacts);
 });
+app.put('/api/users/profile', auth, async (req, res) => {
+  const { firstName, lastName, username } = req.body;
+  await db.run('UPDATE users SET firstName = ?, lastName = ?, username = ? WHERE id = ?', [firstName, lastName, username, req.user.id]);
+  res.json({ success: true });
+});
+app.post('/api/upload/avatar', auth, upload.single('avatar'), async (req, res) => {
+  const url = `${req.protocol}://${req.get('host')}/uploads/avatars/${req.file.filename}`;
+  await db.run('UPDATE users SET avatar = ? WHERE id = ?', [url, req.user.id]);
+  res.json({ url });
+});
 
 app.get('/api/chats', auth, async (req, res) => {
+  const deleted = await db.all('SELECT chatId FROM deleted_chats WHERE userId = ?', [req.user.id]);
+  const deletedIds = new Set(deleted.map(d => d.chatId));
   const contacts = await db.all('SELECT u.id, u.username as name, "user" as type, u.avatar FROM contacts c JOIN users u ON c.contactId = u.id WHERE c.userId = ?', [req.user.id]);
   const groups = await db.all('SELECT g.id, g.name, "group" as type, g.avatar FROM groups g JOIN group_members gm ON g.id = gm.groupId WHERE gm.userId = ?', [req.user.id]);
   const channels = await db.all('SELECT c.id, c.name, "channel" as type, c.avatar FROM channels c JOIN channel_subscribers cs ON c.id = cs.channelId WHERE cs.userId = ?', [req.user.id]);
-  res.json([...contacts, ...groups, ...channels]);
+  const all = [...contacts, ...groups, ...channels].filter(c => !deletedIds.has(c.id));
+  const pinned = await db.all('SELECT chatId FROM pinned_chats WHERE userId = ?', [req.user.id]);
+  const pinnedIds = new Set(pinned.map(p => p.chatId));
+  all.sort((a, b) => (pinnedIds.has(b.id) ? 1 : 0) - (pinnedIds.has(a.id) ? 1 : 0));
+  res.json(all);
 });
 
 app.get('/api/messages/:chatId', auth, async (req, res) => {
@@ -262,122 +162,98 @@ app.get('/api/messages/:chatId', auth, async (req, res) => {
   res.json(messages);
 });
 
-app.post('/api/upload', auth, upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file' });
-  const fileUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.fieldname === 'avatar' ? 'avatars' : req.file.fieldname === 'sticker' ? 'stickers' : 'files'}/${req.file.filename}`;
-  res.json({ url: fileUrl, filename: req.file.filename });
-});
-
-app.post('/api/upload/avatar', auth, upload.single('avatar'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file' });
-  const avatarUrl = `${req.protocol}://${req.get('host')}/uploads/avatars/${req.file.filename}`;
-  await db.run('UPDATE users SET avatar = ? WHERE id = ?', [avatarUrl, req.user.id]);
-  res.json({ url: avatarUrl });
-});
-
-// Группы
-app.post('/api/groups', auth, async (req, res) => {
-  const { name, description, avatar, members } = req.body;
-  const id = uuidv4();
-  await db.run('INSERT INTO groups (id, name, description, avatar, creatorId, type, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)', [id, name, description, avatar, req.user.id, 'group', new Date().toISOString()]);
-  await db.run('INSERT INTO group_members (groupId, userId, role) VALUES (?, ?, ?)', [id, req.user.id, 'creator']);
-  for (const member of (members || [])) {
-    await db.run('INSERT OR IGNORE INTO group_members (groupId, userId, role) VALUES (?, ?, ?)', [id, member, 'member']);
-  }
-  res.json({ id, name });
-});
-
-app.get('/api/groups/:id/members', auth, async (req, res) => {
-  const members = await db.all('SELECT u.id, u.username, u.firstName, u.lastName, u.avatar, gm.role FROM group_members gm JOIN users u ON gm.userId = u.id WHERE gm.groupId = ?', [req.params.id]);
-  res.json(members);
-});
-
-app.post('/api/groups/:id/add', auth, async (req, res) => {
-  const { userId } = req.body;
-  await db.run('INSERT OR IGNORE INTO group_members (groupId, userId, role) VALUES (?, ?, ?)', [req.params.id, userId, 'member']);
-  res.json({ success: true });
-});
-
-// Каналы
-app.post('/api/channels', auth, async (req, res) => {
-  const { name, description, avatar, username, isPublic } = req.body;
-  const id = uuidv4();
-  const inviteLink = `${uuidv4().slice(0, 8)}`;
-  await db.run('INSERT INTO channels (id, name, description, avatar, creatorId, username, isPublic, inviteLink, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [id, name, description, avatar, req.user.id, username, isPublic ? 1 : 0, inviteLink, new Date().toISOString()]);
-  await db.run('INSERT INTO channel_subscribers (channelId, userId) VALUES (?, ?)', [id, req.user.id]);
-  res.json({ id, name, inviteLink });
-});
-
-app.get('/api/channels/:username', auth, async (req, res) => {
-  const channel = await db.get('SELECT * FROM channels WHERE username = ?', [req.params.username]);
-  if (!channel) return res.status(404).json({ error: 'Канал не найден' });
-  res.json(channel);
-});
-
-app.post('/api/channels/:id/join', auth, async (req, res) => {
-  await db.run('INSERT OR IGNORE INTO channel_subscribers (channelId, userId) VALUES (?, ?)', [req.params.id, req.user.id]);
-  res.json({ success: true });
-});
-
-// Стикерпаки
-app.post('/api/sticker-packs', auth, async (req, res) => {
-  const { name } = req.body;
-  const id = uuidv4();
-  const inviteLink = `${uuidv4().slice(0, 8)}`;
-  await db.run('INSERT INTO sticker_packs (id, name, creatorId, inviteLink, createdAt) VALUES (?, ?, ?, ?, ?)', [id, name, req.user.id, inviteLink, new Date().toISOString()]);
-  await db.run('INSERT INTO user_sticker_packs (userId, packId) VALUES (?, ?)', [req.user.id, id]);
-  res.json({ id, name, inviteLink });
-});
-
-app.post('/api/sticker-packs/:id/add-sticker', auth, upload.single('sticker'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'No file' });
-  const packId = req.params.id;
-  const stickerUrl = `${req.protocol}://${req.get('host')}/uploads/stickers/${req.file.filename}`;
-  const stickerId = uuidv4();
-  await db.run('INSERT INTO stickers (id, packId, imageUrl, createdAt) VALUES (?, ?, ?, ?)', [stickerId, packId, stickerUrl, new Date().toISOString()]);
-  res.json({ id: stickerId, url: stickerUrl });
-});
-
-app.get('/api/sticker-packs', auth, async (req, res) => {
-  const packs = await db.all('SELECT sp.*, (SELECT imageUrl FROM stickers WHERE packId = sp.id LIMIT 1) as coverSticker FROM sticker_packs sp JOIN user_sticker_packs usp ON sp.id = usp.packId WHERE usp.userId = ?', [req.user.id]);
-  res.json(packs);
-});
-
-app.get('/api/sticker-packs/:id', auth, async (req, res) => {
-  const pack = await db.get('SELECT * FROM sticker_packs WHERE id = ?', [req.params.id]);
-  if (!pack) return res.status(404).json({ error: 'Not found' });
-  const stickers = await db.all('SELECT * FROM stickers WHERE packId = ?', [req.params.id]);
-  res.json({ ...pack, stickers });
-});
-
-app.post('/api/sticker-packs/:id/add', auth, async (req, res) => {
-  await db.run('INSERT OR IGNORE INTO user_sticker_packs (userId, packId) VALUES (?, ?)', [req.user.id, req.params.id]);
-  res.json({ success: true });
-});
-
-// Управление чатами
-app.post('/api/pinned-chats', auth, async (req, res) => {
-  const { chatId } = req.body;
-  await db.run('INSERT OR IGNORE INTO pinned_chats (userId, chatId) VALUES (?, ?)', [req.user.id, chatId]);
-  res.json({ success: true });
-});
-
-app.delete('/api/pinned-chats/:chatId', auth, async (req, res) => {
-  await db.run('DELETE FROM pinned_chats WHERE userId = ? AND chatId = ?', [req.user.id, req.params.chatId]);
-  res.json({ success: true });
-});
-
 app.delete('/api/messages/:id', auth, async (req, res) => {
   await db.run('DELETE FROM messages WHERE id = ? AND senderId = ?', [req.params.id, req.user.id]);
   res.json({ success: true });
 });
-
 app.post('/api/messages/:id/pin', auth, async (req, res) => {
   await db.run('UPDATE messages SET pinned = 1 WHERE id = ?', [req.params.id]);
   res.json({ success: true });
 });
+app.post('/api/pinned-chats', auth, async (req, res) => {
+  await db.run('INSERT OR IGNORE INTO pinned_chats VALUES (?, ?)', [req.user.id, req.body.chatId]);
+  res.json({ success: true });
+});
+app.delete('/api/pinned-chats/:chatId', auth, async (req, res) => {
+  await db.run('DELETE FROM pinned_chats WHERE userId = ? AND chatId = ?', [req.user.id, req.params.chatId]);
+  res.json({ success: true });
+});
+app.post('/api/deleted-chats', auth, async (req, res) => {
+  await db.run('INSERT OR IGNORE INTO deleted_chats VALUES (?, ?)', [req.user.id, req.body.chatId]);
+  res.json({ success: true });
+});
 
-// ==================== SOCKET.IO ====================
+app.post('/api/groups', auth, async (req, res) => {
+  const id = uuidv4();
+  const inviteLink = uuidv4().slice(0, 8);
+  await db.run('INSERT INTO groups (id, name, description, avatar, creatorId, inviteLink, createdAt) VALUES (?,?,?,?,?,?,?)', 
+    [id, req.body.name, req.body.description || '', req.body.avatar || '', req.user.id, inviteLink, new Date().toISOString()]);
+  await db.run('INSERT INTO group_members VALUES (?, ?, ?)', [id, req.user.id, 'creator']);
+  for (const member of (req.body.members || [])) {
+    await db.run('INSERT OR IGNORE INTO group_members VALUES (?, ?, ?)', [id, member, 'member']);
+  }
+  res.json({ id, name: req.body.name, inviteLink });
+});
+app.post('/api/groups/:id/add', auth, async (req, res) => {
+  await db.run('INSERT OR IGNORE INTO group_members VALUES (?, ?, ?)', [req.params.id, req.body.userId, 'member']);
+  res.json({ success: true });
+});
+app.get('/api/groups', auth, async (req, res) => {
+  const groups = await db.all('SELECT g.* FROM groups g JOIN group_members gm ON g.id = gm.groupId WHERE gm.userId = ?', [req.user.id]);
+  res.json(groups);
+});
+
+app.post('/api/channels', auth, async (req, res) => {
+  const id = uuidv4();
+  const inviteLink = uuidv4().slice(0, 8);
+  await db.run('INSERT INTO channels (id, name, description, avatar, creatorId, username, inviteLink, createdAt) VALUES (?,?,?,?,?,?,?,?)',
+    [id, req.body.name, req.body.description || '', req.body.avatar || '', req.user.id, req.body.username, inviteLink, new Date().toISOString()]);
+  await db.run('INSERT INTO channel_subscribers VALUES (?, ?)', [id, req.user.id]);
+  res.json({ id, name: req.body.name, username: req.body.username, inviteLink });
+});
+app.post('/api/channels/:id/join', auth, async (req, res) => {
+  await db.run('INSERT OR IGNORE INTO channel_subscribers VALUES (?, ?)', [req.params.id, req.user.id]);
+  res.json({ success: true });
+});
+app.get('/api/channels', auth, async (req, res) => {
+  const channels = await db.all('SELECT c.* FROM channels c JOIN channel_subscribers cs ON c.id = cs.channelId WHERE cs.userId = ?', [req.user.id]);
+  res.json(channels);
+});
+
+app.post('/api/sticker-packs', auth, async (req, res) => {
+  const id = uuidv4();
+  const inviteLink = uuidv4().slice(0, 8);
+  await db.run('INSERT INTO sticker_packs (id, name, creatorId, inviteLink, createdAt) VALUES (?,?,?,?,?)', [id, req.body.name, req.user.id, inviteLink, new Date().toISOString()]);
+  await db.run('INSERT INTO user_sticker_packs VALUES (?, ?)', [req.user.id, id]);
+  res.json({ id, name: req.body.name, inviteLink });
+});
+app.post('/api/sticker-packs/:id/add-sticker', auth, upload.single('sticker'), async (req, res) => {
+  const url = `${req.protocol}://${req.get('host')}/uploads/stickers/${req.file.filename}`;
+  const stickerId = uuidv4();
+  await db.run('INSERT INTO stickers (id, packId, imageUrl) VALUES (?,?,?)', [stickerId, req.params.id, url]);
+  res.json({ id: stickerId, url });
+});
+app.get('/api/sticker-packs', auth, async (req, res) => {
+  const packs = await db.all('SELECT sp.*, (SELECT imageUrl FROM stickers WHERE packId = sp.id LIMIT 1) as coverSticker FROM sticker_packs sp JOIN user_sticker_packs usp ON sp.id = usp.packId WHERE usp.userId = ?', [req.user.id]);
+  for (const pack of packs) {
+    pack.stickers = await db.all('SELECT * FROM stickers WHERE packId = ?', [pack.id]);
+  }
+  res.json(packs);
+});
+app.post('/api/sticker-packs/:id/add', auth, async (req, res) => {
+  await db.run('INSERT OR IGNORE INTO user_sticker_packs VALUES (?, ?)', [req.user.id, req.params.id]);
+  res.json({ success: true });
+});
+
+app.post('/api/upload', auth, upload.single('file'), async (req, res) => {
+  let folder = '/files';
+  if (req.file.mimetype?.startsWith('audio/')) folder = '/voice';
+  else if (req.file.mimetype?.startsWith('video/')) folder = '/video';
+  const url = `${req.protocol}://${req.get('host')}/uploads${folder}/${req.file.filename}`;
+  res.json({ url, filename: req.file.originalname, duration: req.body.duration || 0 });
+});
+
+// ========== SOCKET.IO ==========
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
   if (!token) return next(new Error('No token'));
@@ -396,33 +272,18 @@ io.on('connection', async (socket) => {
 
   socket.on('send_message', async (data) => {
     const messageId = uuidv4();
-    const { chatId, content, type, receiverId, fileUrl, fileName, replyTo, isSticker } = data;
-    await db.run(`INSERT INTO messages (id, chatId, senderId, receiverId, type, content, fileUrl, fileName, isSticker, replyTo, createdAt)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [messageId, chatId, socket.userId, receiverId, type, content, fileUrl, fileName, isSticker ? 1 : 0, replyTo, new Date().toISOString()]);
-    
+    await db.run(`INSERT INTO messages (id, chatId, senderId, receiverId, type, content, fileUrl, fileName, duration, isSticker, replyTo, createdAt)
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      [messageId, data.chatId, socket.userId, data.receiverId, data.type, data.content, data.fileUrl, data.fileName, data.duration || 0, data.isSticker ? 1 : 0, data.replyTo || null, new Date().toISOString()]);
     const message = await db.get('SELECT * FROM messages WHERE id = ?', [messageId]);
-    
-    // Отправляем получателю (если есть)
-    if (receiverId) {
-      io.to(`user:${receiverId}`).emit('new_message', message);
-    }
-    // Отправляем в группу/канал
-    if (chatId && !receiverId) {
-      io.to(chatId).emit('new_message', message);
-    }
-    // Подтверждение отправителю
+    if (data.receiverId) io.to(`user:${data.receiverId}`).emit('new_message', message);
+    if (data.chatId && !data.receiverId) io.to(data.chatId).emit('new_message', message);
     socket.emit('message_sent', message);
   });
 
-  socket.on('join_chat', (chatId) => {
-    socket.join(chatId);
-  });
-
+  socket.on('join_chat', (chatId) => socket.join(chatId));
   socket.on('typing', (data) => {
-    if (data.receiverId) {
-      socket.to(`user:${data.receiverId}`).emit('user_typing', { userId: socket.userId, chatId: data.chatId });
-    }
+    if (data.receiverId) socket.to(`user:${data.receiverId}`).emit('user_typing', { userId: socket.userId, chatId: data.chatId });
   });
 
   socket.on('disconnect', async () => {
@@ -432,6 +293,4 @@ io.on('connection', async (socket) => {
   });
 });
 
-server.listen(process.env.PORT || 10000, () => {
-  console.log(`🚀 Noris Backend running on port ${process.env.PORT || 10000}`);
-});
+server.listen(process.env.PORT || 10000, () => console.log(`🚀 Noris running on port ${process.env.PORT || 10000}`));
