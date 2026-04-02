@@ -1,6 +1,0 @@
-services:
-  - type: web
-    name: noris-backend
-    runtime: node
-    buildCommand: npm install
-    startCommand: npm server.js
